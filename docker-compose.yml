@@ -1,0 +1,64 @@
+# 100% free/open-source stack. No cloud, no paid APIs.
+services:
+  mongo:                      # durable source of truth (single-node replica set => multi-document transactions)
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports: ["27017:27017"]
+    healthcheck:
+      test: echo "try { rs.status() } catch (err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }" | mongosh --port 27017 --quiet
+      interval: 5s
+      timeout: 30s
+      retries: 30
+
+  redis:                      # hot path. NO persistence on purpose: restarting it simulates a failover that loses state
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--notify-keyspace-events", "Ex"]
+    ports: ["6379:6379"]
+
+  redis-bus:                  # durable event bus (Redis Streams, AOF on) - stand-in for Kafka at zero cost
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["busdata:/data"]
+
+  backend:
+    build: ./backend
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_started }
+      redis-bus: { condition: service_started }
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      BUS_URL: redis://redis-bus:6379
+      HOLD_TTL_SEC: ${HOLD_TTL_SEC:-300}
+      ADMIT_RATE: ${ADMIT_RATE:-200}
+      ADMIT_BURST: ${ADMIT_BURST:-400}
+      MAX_ACTIVE: ${MAX_ACTIVE:-2000}
+      TOKEN_SECRET: ${TOKEN_SECRET:-change-me}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me-too}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-secret}
+    ports: ["8080:8080"]
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes: ["./frontend:/app"]
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
+    environment: { API_URL: "http://backend:8080" }
+    ports: ["5173:5173"]
+    depends_on: [backend]
+
+  k6:                         # load generator (free, open source)
+    image: grafana/k6
+    profiles: ["load"]
+    volumes: ["./loadtest:/scripts"]
+    command: run /scripts/k6.js
+    environment:
+      BASE: http://backend:8080
+      SEATS: ${SEATS:-1000}
+      VUS: ${VUS:-300}
+    depends_on: [backend]
+
+volumes:
+  busdata:
