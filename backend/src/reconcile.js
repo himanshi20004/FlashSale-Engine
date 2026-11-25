@@ -2,6 +2,7 @@ import { redis, K, runId } from './redis.js';
 import { col } from './db.js';
 import { gate } from './gate.js';
 import { itemIds } from './booking.js';
+import { backendAdmissionOpen } from './metrics.js';
 
 /* Rebuild Redis state for one item from MongoDB (the source of truth):
    free = all seats - booked seats - seats of live (unexpired) HELD holds. */
@@ -44,11 +45,12 @@ export async function rebuildAll() {
 /* Detect Redis restart / failover via run_id; rebuild BEFORE re-opening admission. */
 async function tick() {
   let id;
-  try { id = await runId(); } catch { gate.open = false; return; }
+  try { id = await runId(); } catch { gate.open = false; backendAdmissionOpen.set(0); return; }
   let ready = null;
-  try { ready = await redis.get('sys:ready'); } catch { gate.open = false; return; }
-  if (ready === id) { gate.open = true; return; }
+  try { ready = await redis.get('sys:ready'); } catch { gate.open = false; backendAdmissionOpen.set(0); return; }
+  if (ready === id) { gate.open = true; backendAdmissionOpen.set(1); return; }
   gate.open = false;
+  backendAdmissionOpen.set(0);
   const got = await redis.set('sys:rebuild', id, 'PX', 60000, 'NX').catch(() => null);
   if (!got) return; // another instance is rebuilding; we stay closed until sys:ready matches
   try {

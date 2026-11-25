@@ -3,6 +3,7 @@ import { redis, K, freeCount, activeHoldCount } from './redis.js';
 import { cfg } from './config.js';
 import { gate } from './gate.js';
 import { itemIds } from './booking.js';
+import { recordAdmissions, redisOperationDurationSeconds, redisErrorsTotal } from './metrics.js';
 
 /* ---------- token bucket ---------- */
 export class Bucket {
@@ -40,8 +41,19 @@ export function verifyToken(tok) {
 
 /* ---------- queue operations ---------- */
 export async function joinQueue(itemId, userId) {
-  const r = await redis.flashJoin(K.queue(itemId), K.admitted(itemId), K.qseq(itemId), userId);
-  return r;
+  const t0 = process.hrtime.bigint();
+  try {
+    const r = await redis.flashJoin(K.queue(itemId), K.admitted(itemId), K.qseq(itemId), userId);
+    if (r > 0) {
+      await redis.hsetnx(K.qjoined(itemId), userId, String(Date.now())).catch(() => {});
+    }
+    return r;
+  } catch (e) {
+    redisErrorsTotal.inc({ role: 'hot', operation: 'flashJoin' });
+    throw e;
+  } finally {
+    redisOperationDurationSeconds.observe({ operation: 'flashJoin' }, Number(process.hrtime.bigint() - t0) / 1e9);
+  }
 }
 
 async function soldOut(itemId) {
@@ -86,8 +98,20 @@ export function startAdmissionController() {
         if (!b) buckets.set(item, (b = new Bucket(cfg.admitRate, cfg.admitBurst)));
         const n = b.available();
         if (n < 1) continue;
-        const users = await redis.flashAdmit(K.queue(item), K.admitted(item), n, Date.now(), cfg.admitTtlMs, cfg.maxActive);
+        const now = Date.now();
+        const t0 = process.hrtime.bigint();
+        const users = await redis.flashAdmit(K.queue(item), K.admitted(item), n, now, cfg.admitTtlMs, cfg.maxActive);
+        redisOperationDurationSeconds.observe({ operation: 'flashAdmit' }, Number(process.hrtime.bigint() - t0) / 1e9);
         b.consume(users.length);
+        if (users.length) {
+          const joinedTimes = await redis.hmget(K.qjoined(item), ...users).catch(() => []);
+          await redis.hdel(K.qjoined(item), ...users).catch(() => {});
+          const waitSecs = users.map((_, idx) => {
+            const ts = Number(joinedTimes?.[idx]);
+            return Number.isFinite(ts) && ts > 0 ? Math.max(0, (now - ts) / 1000) : 0;
+          });
+          recordAdmissions(item, waitSecs);
+        }
       }
     } catch { /* redis down: gate/reconciler handle it */ } finally { busy = false; }
   }, 100).unref();

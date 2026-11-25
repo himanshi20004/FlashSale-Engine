@@ -9,9 +9,30 @@ import { Bucket, joinQueue, queueStatus, isSoldOut, verifyToken, startAdmissionC
 import { startExpiry } from './expiry.js';
 import { startReconciler, rebuildItem } from './reconcile.js';
 import { startRelay, startConsumer } from './relay.js';
+import {
+  register,
+  recordHttpSample,
+  sseActiveConnections,
+  queueRejectedTotal,
+  inventorySoldOutRejectionsTotal,
+  startMetricsSampler,
+  getAdminMetricsSummary,
+} from './metrics.js';
 
 const app = express();
 app.use(express.json({ limit: '100kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
+
+app.use((req, res, next) => {
+  if (req.path === '/metrics') return next();
+  const isSse = req.path === '/api/queue/events';
+  const t0 = process.hrtime.bigint();
+  res.on('finish', () => {
+    const dur = Number(process.hrtime.bigint() - t0) / 1e9;
+    const route = req.route?.path ? `${req.baseUrl || ''}${req.route.path}` : 'unmatched';
+    recordHttpSample(req.method, route, res.statusCode, dur, isSse);
+  });
+  next();
+});
 
 const wrap = (fn) => (req, res) => fn(req, res).catch((err) => {
   if (err instanceof booking.BookingError) return res.status(err.status).json({ error: err.code });
@@ -21,8 +42,13 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((err) => {
   res.status(500).json({ error: 'internal' });
 });
 
-const needGate = (_req, res, next) =>
-  gate.open ? next() : res.set('Retry-After', '2').status(503).json({ error: 'system_warming_up' });
+const needGate = (req, res, next) => {
+  if (gate.open) return next();
+  if (req.path === '/api/queue/join') {
+    queueRejectedTotal.inc({ item_id: String(req.body?.itemId || 'unknown'), reason: 'warming_up' });
+  }
+  return res.set('Retry-After', '2').status(503).json({ error: 'system_warming_up' });
+};
 
 const needToken = (req, res, next) => {
   const c = verifyToken((req.headers.authorization || '').replace(/^Bearer /, ''));
@@ -37,6 +63,11 @@ const joinBucket = new Bucket(cfg.joinRps, cfg.joinRps);
 /* ---------------- public ---------------- */
 app.get('/healthz', (_req, res) => res.json({ ok: true, admissionOpen: gate.open }));
 
+app.get('/metrics', async (_req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
 app.get('/api/items/:id', wrap(async (req, res) => {
   const item = await col.items.findOne({ _id: req.params.id });
   if (!item) return res.status(404).json({ error: 'not_found' });
@@ -47,10 +78,21 @@ app.get('/api/items/:id', wrap(async (req, res) => {
 
 /* ---------------- waiting room ---------------- */
 app.post('/api/queue/join', needGate, wrap(async (req, res) => {
-  if (!joinBucket.allow()) return res.set('Retry-After', '1').status(429).json({ error: 'busy' });
+  const rawItem = String(req.body?.itemId || 'unknown');
+  if (!joinBucket.allow()) {
+    queueRejectedTotal.inc({ item_id: rawItem, reason: 'rate_limited' });
+    return res.set('Retry-After', '1').status(429).json({ error: 'busy' });
+  }
   const { itemId, userId } = req.body || {};
-  if (!itemId || !userId || String(userId).length > 64) return res.status(400).json({ error: 'itemId_and_userId_required' });
-  if (await isSoldOut(itemId)) return res.status(410).json({ error: 'sold_out' });
+  if (!itemId || !userId || String(userId).length > 64) {
+    queueRejectedTotal.inc({ item_id: rawItem, reason: 'invalid' });
+    return res.status(400).json({ error: 'itemId_and_userId_required' });
+  }
+  if (await isSoldOut(itemId)) {
+    queueRejectedTotal.inc({ item_id: String(itemId), reason: 'sold_out' });
+    inventorySoldOutRejectionsTotal.inc({ item_id: String(itemId), stage: 'queue_join' });
+    return res.status(410).json({ error: 'sold_out' });
+  }
   const rank = await joinQueue(itemId, String(userId));
   res.json(rank === -1 ? { state: 'admitted' } : { state: 'waiting', position: rank, etaSeconds: Math.ceil(rank / cfg.admitRate) });
 }));
@@ -62,16 +104,21 @@ app.get('/api/queue/status', wrap(async (req, res) => {
 app.get('/api/queue/events', async (req, res) => { // SSE
   const itemId = String(req.query.itemId), userId = String(req.query.userId);
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  sseActiveConnections.inc();
   let closed = false; req.on('close', () => { closed = true; });
-  const t0 = Date.now();
-  while (!closed && Date.now() - t0 < 30 * 60 * 1000) {
-    let st;
-    try { st = gate.open ? await queueStatus(itemId, userId) : { state: 'paused' }; } catch { st = { state: 'paused' }; }
-    res.write(`data: ${JSON.stringify(st)}\n\n`);
-    if (st.state === 'admitted' || st.state === 'sold_out') break;
-    await new Promise((r) => setTimeout(r, 1000));
+  try {
+    const t0 = Date.now();
+    while (!closed && Date.now() - t0 < 30 * 60 * 1000) {
+      let st;
+      try { st = gate.open ? await queueStatus(itemId, userId) : { state: 'paused' }; } catch { st = { state: 'paused' }; }
+      res.write(`data: ${JSON.stringify(st)}\n\n`);
+      if (st.state === 'admitted' || st.state === 'sold_out') break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    res.end();
+  } finally {
+    sseActiveConnections.dec();
   }
-  res.end();
 });
 
 /* ---------------- booking (admitted tokens only) ---------------- */
@@ -127,7 +174,7 @@ app.post('/admin/items', needAdmin, wrap(async (req, res) => {
   if (req.query.reset === 'true') { // test convenience: wipe a previous run
     await Promise.all([col.bookings.deleteMany({ itemId: id }), col.holds.deleteMany({ itemId: id }),
       col.outbox.deleteMany({}), col.idem.deleteMany({}),
-      redis.del(K.queue(id), K.admitted(id), K.qseq(id))]);
+      redis.del(K.queue(id), K.admitted(id), K.qseq(id), K.qjoined(id))]);
   }
   await col.items.updateOne({ _id: id }, { $set: { name, totalSeats, pricePaise } }, { upsert: true });
   booking.invalidateItems();
@@ -157,6 +204,11 @@ app.get('/admin/verify/:id', needAdmin, wrap(async (req, res) => {
     recentNotifications: await bus.lrange('notifications:recent', 0, 4).catch(() => []) });
 }));
 
+app.get('/admin/metrics/summary', needAdmin, wrap(async (req, res) => {
+  const itemId = req.query.itemId ? String(req.query.itemId) : undefined;
+  res.json(await getAdminMetricsSummary(itemId, { redis, bus, K, freeCount, activeHoldCount }));
+}));
+
 /* ---------------- boot ---------------- */
 async function main() {
   await connectDb();
@@ -165,6 +217,7 @@ async function main() {
   await startExpiry();
   startRelay();
   if (cfg.runConsumer) await startConsumer();
+  startMetricsSampler({ redis, bus, K, freeCount, activeHoldCount });
   app.listen(cfg.port, () => console.log(`flashsale listening on :${cfg.port}`));
 }
 main().catch((e) => { console.error(e); process.exit(1); });

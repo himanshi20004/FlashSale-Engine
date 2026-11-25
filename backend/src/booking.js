@@ -3,6 +3,17 @@ import { col, inTx } from './db.js';
 import * as R from './redis.js';
 import { gate } from './gate.js';
 import { cfg } from './config.js';
+import {
+  holdAttemptsTotal,
+  bookingAttemptsTotal,
+  bookingsConfirmedTotal,
+  bookingsRefundedTotal,
+  holdsExpiredTotal,
+  holdsCancelledTotal,
+  holdCreateDurationSeconds,
+  holdConfirmDurationSeconds,
+  inventorySoldOutRejectionsTotal,
+} from './metrics.js';
 
 export class BookingError extends Error {
   constructor(code, status) { super(code); this.code = code; this.status = status; }
@@ -25,23 +36,45 @@ const outboxDoc = (aggregateId, type, payload) =>
 
 /* ---------- HOLD ---------- */
 export async function createHold(itemId, userId, qty) {
-  if (!gate.open) throw new BookingError('system_warming_up', 503);
-  if (!Number.isInteger(qty) || qty < 1 || qty > 4) throw new BookingError('bad_quantity', 400);
-  const id = randomUUID();
-  const exp = Date.now() + cfg.holdTtlMs;
-  const { code, seats } = await R.holdSeats(itemId, userId, id, qty, exp);
-  if (code === -1) throw new BookingError('already_holding', 409);
-  if (code === -2) throw new BookingError('sold_out', 410);
+  const t0 = process.hrtime.bigint();
+  let outcome = 'error';
   try {
-    await col.holds.insertOne({
-      _id: id, itemId, userId, seatIds: seats, status: 'HELD',
-      expiresAt: new Date(exp), createdAt: new Date(),
-    });
-  } catch (e) {
-    await R.releaseHoldSeats(itemId, id).catch(() => {}); // compensate
-    throw e;
+    if (!gate.open) {
+      outcome = 'warming_up';
+      throw new BookingError('system_warming_up', 503);
+    }
+    if (!Number.isInteger(qty) || qty < 1 || qty > 4) {
+      outcome = 'bad_quantity';
+      throw new BookingError('bad_quantity', 400);
+    }
+    const id = randomUUID();
+    const exp = Date.now() + cfg.holdTtlMs;
+    const { code, seats } = await R.holdSeats(itemId, userId, id, qty, exp);
+    if (code === -1) {
+      outcome = 'already_holding';
+      throw new BookingError('already_holding', 409);
+    }
+    if (code === -2) {
+      outcome = 'sold_out';
+      inventorySoldOutRejectionsTotal.inc({ item_id: itemId, stage: 'hold' });
+      throw new BookingError('sold_out', 410);
+    }
+    try {
+      await col.holds.insertOne({
+        _id: id, itemId, userId, seatIds: seats, status: 'HELD',
+        expiresAt: new Date(exp), createdAt: new Date(),
+      });
+    } catch (e) {
+      await R.releaseHoldSeats(itemId, id).catch(() => {}); // compensate
+      throw e;
+    }
+    outcome = 'created';
+    return { holdId: id, itemId, seats, expiresAt: new Date(exp).toISOString() };
+  } finally {
+    const dur = Number(process.hrtime.bigint() - t0) / 1e9;
+    holdAttemptsTotal.inc({ item_id: itemId, outcome });
+    holdCreateDurationSeconds.observe({ item_id: itemId, outcome }, dur);
   }
-  return { holdId: id, itemId, seats, expiresAt: new Date(exp).toISOString() };
 }
 
 export const getHold = (id) => col.holds.findOne({ _id: id });
@@ -57,17 +90,24 @@ export async function cancelHold(holdId, userId) {
 /* ---------- RELEASE (TTL expiry, sweeper, explicit cancel). Idempotent. ---------- */
 export async function releaseHold(itemId, holdId, newStatus = 'EXPIRED') {
   await R.releaseHoldSeats(itemId, holdId);
+  let transitioned = false;
   await inTx(async (s) => {
+    transitioned = false;
     const doc = await col.holds.findOneAndUpdate(
       { _id: holdId, status: 'HELD' },
       { $set: { status: newStatus, updatedAt: new Date() } },
       { session: s, returnDocument: 'after' });
     if (doc) {
+      transitioned = true;
       await col.outbox.insertOne(outboxDoc(holdId,
         newStatus === 'EXPIRED' ? 'HoldExpired' : 'HoldCancelled',
         { holdId, itemId: doc.itemId, userId: doc.userId, seats: doc.seatIds }), { session: s });
     }
   });
+  if (transitioned) {
+    if (newStatus === 'EXPIRED') holdsExpiredTotal.inc({ item_id: itemId });
+    else if (newStatus === 'CANCELLED') holdsCancelledTotal.inc({ item_id: itemId });
+  }
 }
 
 /* ---------- PAYMENT WEBHOOK (idempotent, single-flight per event id) ---------- */
@@ -108,18 +148,34 @@ export async function handlePayment(ev) {
   const key = 'pay:' + ev.eventId;
   const claim = await claimKey(key);
   if (claim.replay) return claim.value;
+  const t0 = process.hrtime.bigint();
+  let metricItem = 'unknown';
+  let metricOutcome = 'error';
   try {
-    return await processPayment(ev, key);
+    const res = await processPayment(ev, key);
+    metricItem = res.itemId || 'unknown';
+    metricOutcome = res.outcome || 'unknown';
+    return { status: res.status, body: res.body };
   } catch (e) {
     await col.idem.deleteOne({ _id: key, state: 'processing' }).catch(() => {}); // let the PSP retry cleanly
     throw e;
+  } finally {
+    const dur = Number(process.hrtime.bigint() - t0) / 1e9;
+    bookingAttemptsTotal.inc({ item_id: metricItem, outcome: metricOutcome });
+    holdConfirmDurationSeconds.observe({ item_id: metricItem, outcome: metricOutcome }, dur);
   }
 }
 
 async function processPayment(ev, key) {
   const hold = await col.holds.findOne({ _id: ev.holdId });
-  if (!hold) return finishPlain(key, 404, { result: 'unknown_hold' });
-  if (ev.status !== 'succeeded') return finishPlain(key, 200, { result: 'ignored', reason: 'payment_' + ev.status });
+  if (!hold) {
+    const r = await finishPlain(key, 404, { result: 'unknown_hold' });
+    return { ...r, itemId: 'unknown', outcome: 'unknown_hold' };
+  }
+  if (ev.status !== 'succeeded') {
+    const r = await finishPlain(key, 200, { result: 'ignored', reason: 'payment_' + ev.status });
+    return { ...r, itemId: hold.itemId, outcome: 'ignored' };
+  }
 
   const item = await col.items.findOne({ _id: hold.itemId });
   if (ev.amountPaise !== item.pricePaise * hold.seatIds.length)
@@ -160,8 +216,9 @@ async function commitConfirm(key, ev, hold) {
     }), { session: s });
     await markDone(s, key, 200, body);
   });
+  bookingsConfirmedTotal.inc({ item_id: hold.itemId });
   await R.removeAdmitted(hold.itemId, hold.userId).catch(() => {});
-  return { status: 200, body };
+  return { status: 200, body, itemId: hold.itemId, outcome: 'confirmed' };
 }
 
 async function refund(key, ev, hold, reason, status, { markRefunded, restoreUnbooked } = {}) {
@@ -176,11 +233,12 @@ async function refund(key, ev, hold, reason, status, { markRefunded, restoreUnbo
     }), { session: s });
     await markDone(s, key, status, body);
   });
+  bookingsRefundedTotal.inc({ item_id: hold.itemId, reason });
   if (restoreUnbooked) {
     // seats of this hold NOT owned by someone else go back to the free pool
     const owned = new Set((await col.bookings.find({ itemId: hold.itemId, seatId: { $in: hold.seatIds } })
       .project({ seatId: 1 }).toArray()).map((b) => b.seatId));
     await R.restoreSeats(hold.itemId, hold.seatIds.filter((s) => !owned.has(s))).catch(() => {});
   }
-  return { status, body };
+  return { status, body, itemId: hold.itemId, outcome: status === 409 ? 'conflict' : 'refunded' };
 }

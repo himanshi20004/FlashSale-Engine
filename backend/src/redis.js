@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import { cfg } from './config.js';
+import { redisOperationDurationSeconds, redisErrorsTotal } from './metrics.js';
 
 const opts = {
   maxRetriesPerRequest: 1,
@@ -20,6 +21,7 @@ export const K = {
   queue: (i) => `queue:{${i}}`,
   admitted: (i) => `admitted:{${i}}`,
   qseq: (i) => `queueseq:{${i}}`,
+  qjoined: (i) => `qjoined:{${i}}`,
 };
 
 /* ---------------- Lua scripts (each runs atomically inside Redis) ---------------- */
@@ -118,24 +120,45 @@ return users
 
 /* ---------------- typed wrappers ---------------- */
 
+async function timedRedisOp(operation, fn) {
+  const t0 = process.hrtime.bigint();
+  try {
+    return await fn();
+  } catch (e) {
+    redisErrorsTotal.inc({ role: 'hot', operation });
+    throw e;
+  } finally {
+    const dur = Number(process.hrtime.bigint() - t0) / 1e9;
+    redisOperationDurationSeconds.observe({ operation }, dur);
+  }
+}
+
 export async function holdSeats(item, user, holdId, qty, expMs) {
   const ttl = Math.max(1, expMs - Date.now());
-  const r = await redis.flashHold(K.free(item), K.hold(item, holdId), K.holdData(item, holdId),
-    K.holdsExp(item), K.userHold(item, user), qty, ttl, holdId, expMs, item, user);
+  const r = await timedRedisOp('flashHold', () =>
+    redis.flashHold(K.free(item), K.hold(item, holdId), K.holdData(item, holdId),
+      K.holdsExp(item), K.userHold(item, user), qty, ttl, holdId, expMs, item, user));
   return { code: r[0], seats: r[0] === 1 ? String(r[1]).split(',').map(Number) : [] };
 }
 export const releaseHoldSeats = (item, id) =>
-  redis.flashRelease(K.free(item), K.hold(item, id), K.holdData(item, id), K.holdsExp(item), id, item);
+  timedRedisOp('flashRelease', () =>
+    redis.flashRelease(K.free(item), K.hold(item, id), K.holdData(item, id), K.holdsExp(item), id, item));
 export const confirmSeats = (item, id, user, seats) =>
-  redis.flashConfirm(K.free(item), K.hold(item, id), K.holdData(item, id), K.holdsExp(item), id, item, user, seats.join(','));
-export const restoreSeats = (item, seats) => (seats.length ? redis.sadd(K.free(item), ...seats.map(String)) : 0);
-export const removeAdmitted = (item, user) => redis.zrem(K.admitted(item), user);
-export const freeCount = (item) => redis.scard(K.free(item));
-export const activeHoldCount = (item) => redis.zcard(K.holdsExp(item));
-export const dueHolds = (item, nowMs) => redis.zrangebyscore(K.holdsExp(item), '-inf', nowMs, 'LIMIT', 0, 500);
+  timedRedisOp('flashConfirm', () =>
+    redis.flashConfirm(K.free(item), K.hold(item, id), K.holdData(item, id), K.holdsExp(item), id, item, user, seats.join(',')));
+export const restoreSeats = (item, seats) =>
+  (seats.length ? timedRedisOp('restoreSeats', () => redis.sadd(K.free(item), ...seats.map(String))) : 0);
+export const removeAdmitted = (item, user) =>
+  timedRedisOp('removeAdmitted', () => redis.zrem(K.admitted(item), user));
+export const freeCount = (item) =>
+  timedRedisOp('freeCount', () => redis.scard(K.free(item)));
+export const activeHoldCount = (item) =>
+  timedRedisOp('activeHoldCount', () => redis.zcard(K.holdsExp(item)));
+export const dueHolds = (item, nowMs) =>
+  timedRedisOp('dueHolds', () => redis.zrangebyscore(K.holdsExp(item), '-inf', nowMs, 'LIMIT', 0, 500));
 
 export async function runId() {
-  const info = await redis.info('server');
+  const info = await timedRedisOp('info_server', () => redis.info('server'));
   const m = /run_id:(\w+)/.exec(info);
   return m ? m[1] : 'unknown';
 }
