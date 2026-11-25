@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import MonitoringDashboard from './MonitoringDashboard.jsx';
 
 const ITEM = 'concert-1';
+const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
 const api = async (path, opts = {}, token) => {
-  const r = await fetch(path, {
+  const r = await fetch(`${API_BASE}${path}`, {
     ...opts,
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
   });
@@ -44,7 +45,7 @@ export default function App() {
     if (r.status !== 200) return setMsg(`Could not join (${r.status}): ${r.body.error}. Retry shortly.`);
     setPhase('waiting');
     es.current?.close();
-    const src = new EventSource(`/api/queue/events?itemId=${ITEM}&userId=${userId}`);
+    const src = new EventSource(`${API_BASE}/api/queue/events?itemId=${ITEM}&userId=${userId}`);
     es.current = src;
     src.onmessage = (e) => {
       const s = JSON.parse(e.data);

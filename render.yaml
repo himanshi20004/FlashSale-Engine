@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: flashsale-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: BUS_URL
+        sync: false
+      - key: TOKEN_SECRET
+        generateValue: true
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: MOCK_PSP
+        value: "true"
+      - key: HOLD_TTL_SEC
+        value: "300"
+      - key: ADMIT_RATE
+        value: "200"
+      - key: ADMIT_BURST
+        value: "400"
+      - key: MAX_ACTIVE
+        value: "2000"

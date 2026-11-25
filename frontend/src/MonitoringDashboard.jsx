@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './MonitoringDashboard.css';
 
 const TOKEN_KEY = 'flashsale_admin_token';
+const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
 
 function LineChart({ data, series, unit = '', height = 170 }) {
   const width = 520;
@@ -82,7 +83,7 @@ export default function MonitoringDashboard() {
     if (!hasLoadedRef.current) setLoading(true);
     try {
       const qs = itemId ? `?itemId=${encodeURIComponent(itemId)}` : '';
-      const res = await fetch(`/admin/metrics/summary${qs}`, {
+      const res = await fetch(`${API_BASE}/admin/metrics/summary${qs}`, {
         headers: { 'x-admin-token': tok },
       });
       if (res.status === 401) {
