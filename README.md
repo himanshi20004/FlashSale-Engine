@@ -1,0 +1,199 @@
+# Flash-Sale Booking Engine with Virtual Waiting Room
+
+A high-concurrency flash-sale ticketing and seat-booking engine built with **Node.js / Express**, **React + Vite**, **Redis 7** (atomic Lua scripts + Redis Streams), and **MongoDB 7** (replica-set transactions + unique seat constraints). Designed to survive burst traffic, duplicate payment webhook storms, and mid-sale Redis failovers with **zero oversell**.
+
+---
+
+## Architecture Overview
+
+```text
+React (Vite :5173) ──REST / SSE──► Express (:8080)
+                                      ├─► Waiting Room   (FIFO ZSET + token bucket + HMAC-SHA256 tokens)
+                                      ├─► Hold Path      (Redis Lua: atomic check + SPOP seats + PX TTL)
+                                      ├─► Payment Hook   (HMAC-verified, idempotent claim -> Lua confirm -> Mongo txn)
+                                      └─► Expiry         (Keyspace notifications + Redis ZSET sweeper + Mongo sweeper)
+
+MongoDB Outbox ──relay (leader lock)──► Redis Stream (AOF) ──► Consumer Group (dedupe + analytics/notifications)
+Reconciler     ──detects Redis run_id change──► Closes admission gate ─► Rebuilds Redis from MongoDB ─► Reopens gate
+```
+
+### Core Consistency Model
+* **Redis is the fast path** (hot inventory sets, holds, waiting room queues) and is configured intentionally **without persistence** in `docker-compose.yml` to simulate failover/state loss.
+* **MongoDB is the durable source of truth**, enforcing a unique compound index `{ itemId: 1, seatId: 1 }` on `bookings` as the final guarantee against double-booking.
+* **Event bus (`redis-bus`)** runs Redis Streams with AOF persistence for at-least-once delivery; consumers deduplicate using a 24-hour `seen:<id>` key.
+
+---
+
+## Key Guarantees & Invariants
+
+Verified at any time via `GET /admin/verify/:id`:
+* **Zero oversell (`noOversell`):** `booked <= totalSeats`, `duplicateSeats === 0`, and `outOfRange === 0`.
+* **Seat conservation (`conserved`):** When quiescent (holds settled), `booked + redisFree + heldSeats === totalSeats`.
+* **Idempotent payments:** Concurrent identical webhook deliveries (`repeat > 1`) share a single-flight `idempotency_keys` claim with stale-lease recovery and produce exactly one side effect.
+* **Late-payment handling:** If a hold expires before payment arrives, `flashConfirm` attempts an all-or-nothing re-claim of the same seats; if unavailable, the system records a `PaymentRefunded` outbox event (`LATE_PAYMENT_SEATS_UNAVAILABLE`).
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| **Frontend** | React 18, Vite 5 (proxying `/api` and `/dev` to backend) |
+| **Backend API** | Node.js >= 20, Express 4 |
+| **Hot Inventory & Queue** | Redis 7 (`ioredis`, 5 atomic Lua scripts) |
+| **Durable Storage** | MongoDB 7 (single-node replica set `rs0` for multi-doc transactions) |
+| **Event Bus** | Redis 7 Streams (`appendonly yes`) |
+| **Load & Chaos Testing** | Grafana k6, Bash chaos/verification scripts |
+| **Optional Ops Copilot** | LangGraph.js + local Ollama (`llama3.2`) with deterministic fallback |
+
+---
+
+## Project Structure
+
+```text
+.
+├── backend/
+│   ├── Dockerfile              # Node 20 Alpine production container
+│   ├── package.json            # Backend dependencies (express, ioredis, mongodb)
+│   ├── scripts/
+│   │   └── test-lua.js         # Redis Lua unit + 5,000-concurrent contention test
+│   └── src/
+│       ├── config.js           # Environment configuration and defaults
+│       ├── db.js               # MongoDB connection, indexes, and transaction helper
+│       ├── gate.js             # In-process admission gate flag
+│       ├── redis.js            # Redis/bus clients + atomic Lua scripts
+│       ├── admission.js        # Token bucket, HMAC queue tokens, leader-elected admission loop
+│       ├── booking.js          # Seat holds, release, idempotent payment confirmation & refunds
+│       ├── expiry.js           # 3-tier hold expiration (keyspace events, Redis ZSET, Mongo sweeper)
+│       ├── reconcile.js        # Redis run_id failover detector and state rebuilder
+│       ├── relay.js            # Transactional outbox relay and deduplicating stream consumer
+│       └── server.js           # Express REST/SSE API, mock PSP (/dev/pay), and admin routes
+├── frontend/
+│   ├── index.html
+│   ├── vite.config.js          # Dev server (:5173) + proxy to backend (:8080)
+│   └── src/
+│       ├── main.jsx
+│       └── App.jsx             # Waiting room, SSE queue status, seat hold countdown, mock checkout
+├── loadtest/
+│   └── k6.js                   # Ramping-VU burst test with 3x webhook retry storms
+├── ops-agent/
+│   ├── package.json
+│   └── agent.js                # Optional LangGraph.js + Ollama post-run health summarizer
+├── scripts/
+│   ├── chaos.sh                # Kills Redis twice and restarts backend mid-load, then verifies
+│   └── verify.sh               # Checks /admin/verify/:id invariants
+├── docker-compose.yml          # Full local stack (mongo, redis, redis-bus, backend, frontend, k6)
+└── Makefile                    # Convenience targets for up, seed, load, chaos, verify, test-lua
+```
+
+---
+
+## Prerequisites
+
+* **Docker & Docker Compose** (v2+)
+* **Node.js >= 20** & **npm** (if running `test-lua` or `ops-agent` locally)
+* **GNU Make** & `curl` / `bash` (optional, for `Makefile` and `scripts/*.sh`)
+
+---
+
+## Quick Start
+
+1. **Start the full stack:**
+   ```bash
+   make up
+   # Equivalent: docker compose up --build -d mongo redis redis-bus backend frontend
+   ```
+
+2. **Seed a flash-sale item (`concert-1`, 50 seats):**
+   ```bash
+   make seed
+   ```
+
+3. **Open the UI:**
+   Visit `http://localhost:5173`, join the waiting room, hold up to 4 seats, and test checkout via the mock PSP.
+
+4. **Stop and clean volumes:**
+   ```bash
+   make down
+   ```
+
+---
+
+## Configuration (Environment Variables)
+
+| Variable | Default (`config.js` / Compose) | Description |
+| :--- | :--- | :--- |
+| `PORT` | `8080` | Backend HTTP port |
+| `MONGO_URL` | `mongodb://localhost:27017/?replicaSet=rs0` (`mongodb://mongo:27017/?replicaSet=rs0` in Compose) | MongoDB replica set URI |
+| `DB_NAME` | `flashsale` | MongoDB database name |
+| `REDIS_URL` | `redis://localhost:6379` (`redis://redis:6379` in Compose) | Ephemeral hot-path Redis URI |
+| `BUS_URL` | `redis://localhost:6380` (`redis://redis-bus:6379` in Compose) | Durable AOF Redis Streams URI |
+| `TOKEN_SECRET` | `dev-token-secret` (`change-me` in Compose) | HMAC secret for waiting-room admission tokens |
+| `WEBHOOK_SECRET` | `dev-webhook-secret` (`change-me-too` in Compose) | HMAC secret for `/webhooks/payment` signatures |
+| `ADMIN_TOKEN` | `admin-secret` | Header token (`x-admin-token`) for `/admin/*` endpoints |
+| `SELF_URL` | `http://127.0.0.1:${PORT}` | Base URL used by `/dev/pay` to post signed webhooks |
+| `HOLD_TTL_SEC` | `300` | Seat hold expiration TTL in seconds |
+| `ADMIT_RATE` | `200` | Users admitted per second per item |
+| `ADMIT_BURST` | `400` | Token bucket burst capacity |
+| `MAX_ACTIVE` | `2000` | Maximum concurrently admitted users per item |
+| `ADMIT_TTL_SEC` | `180` | Admission token validity in seconds |
+| `JOIN_RPS` | `5000` | Per-instance rate limit on `/api/queue/join` |
+| `MOCK_PSP` | `true` | Enables `/dev/pay` mock payment endpoint (set `false` in production) |
+| `RUN_CONSUMER` | `true` | Runs the in-process Redis Stream `notifier` consumer |
+
+---
+
+## API & Webhook Reference
+
+### Public & Waiting Room
+* `GET /healthz` — Returns `{ ok: true, admissionOpen }`.
+* `GET /api/items/:id` — Returns item details, available seats, active holds, queue length, and gate state.
+* `POST /api/queue/join` — Enters the FIFO queue (`{ itemId, userId }`).
+* `GET /api/queue/status?itemId=...&userId=...` — Polls waiting-room position, ETA, or signed admission token.
+* `GET /api/queue/events?itemId=...&userId=...` — Server-Sent Events (SSE) stream pushing live queue/admission updates.
+
+### Booking (Requires `Authorization: Bearer <queue-token>`)
+* `POST /api/holds` — Atomically holds `1..4` seats (`{ qty }`).
+* `GET /api/holds/:id` — Inspects hold status and assigned seats for the token owner.
+* `DELETE /api/holds/:id` — Cancels an active hold and returns seats to the free pool.
+
+### Payments & Mock PSP
+* `POST /webhooks/payment` — Verified via `x-signature` (hex HMAC-SHA256 of raw JSON body using `WEBHOOK_SECRET`). Idempotent per `eventId`.
+* `POST /dev/pay` *(when `MOCK_PSP=true`)* — Triggers signed payment webhooks against `/webhooks/payment` (`repeat` up to `50` simulates concurrent retry storms).
+
+### Admin (Requires `x-admin-token: <ADMIN_TOKEN>`)
+* `POST /admin/items?reset=true` — Creates/updates an item and rebuilds its Redis inventory (with optional reset of bookings/holds/outbox/queue).
+* `GET /admin/verify/:id` — Audits oversell, duplicate seats, seat conservation, hold status counts, and recent stream analytics/notifications.
+
+---
+
+## Testing, Load & Chaos Verification
+
+* **Lua Script & Contention Tests** *(requires a local Redis on `:6379`; flushes DB)*:
+  ```bash
+  make test-lua
+  ```
+* **k6 Burst Load Test** *(20s hold TTL, 300 VUs, 1,000 seats, 3x payment retries)*:
+  ```bash
+  make load
+  ```
+* **Invariant Verification**:
+  ```bash
+  make verify
+  ```
+* **Chaos Engineering Test** *(kills `redis` twice and restarts `backend` during live k6 load, then verifies zero oversell)*:
+  ```bash
+  make chaos
+  ```
+* **Optional LangGraph Ops Copilot** *(runs outside the booking path; falls back to deterministic summary if local Ollama is not running)*:
+  ```bash
+  cd ops-agent && npm install && ITEM=drop-1 npm start
+  ```
+
+---
+
+## Production Hardening Notes
+
+* **Replace demo defaults:** Override `TOKEN_SECRET`, `WEBHOOK_SECRET`, and `ADMIN_TOKEN`, and set `MOCK_PSP=false` outside local/test environments.
+* **Authentication:** `userId` is currently client-supplied for demonstration purposes; place real user authentication in front of queue and hold endpoints for production.
+* **Event bus swap:** Replace `backend/src/relay.js` to publish from the MongoDB `outbox` collection to Kafka or another broker without altering the booking transaction contract.
