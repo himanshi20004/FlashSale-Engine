@@ -4,6 +4,22 @@ A high-concurrency flash-sale ticketing and seat-booking engine built with **Nod
 
 ---
 
+## Live Deployment
+
+* **Live App (Vercel):** https://himanshi-flashsale-uiwerx.vercel.app
+* **Monitoring & Analytics UI:** https://himanshi-flashsale-uiwerx.vercel.app/#/monitor *(requires `ADMIN_TOKEN`)*
+* **Backend Health & Metrics (Render):** https://flashsale-engine-4lel.onrender.com/healthz · https://flashsale-engine-4lel.onrender.com/metrics
+
+### Screenshots
+
+#### Buyer Storefront (Waiting Room & Seat Hold Checkout)
+![Buyer Storefront](docs/images/buyer-storefront.png)
+
+#### Real-Time Observability & Analytics Dashboard
+![Monitoring & Analytics Dashboard](docs/images/monitoring-dashboard.png)
+
+---
+
 ## Architecture Overview
 
 ```text
