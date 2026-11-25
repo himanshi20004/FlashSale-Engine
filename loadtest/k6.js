@@ -16,6 +16,11 @@ const refunded = new Counter('flow_refunded');
 const conflicts = new Counter('flow_conflict_409');
 const soldOutC = new Counter('flow_sold_out');
 const dupHold = new Counter('flow_already_holding');
+const businessRejections = new Counter('flow_business_rejections');
+const serverErrors = new Counter('flow_server_errors');
+
+// Treat expected flash-sale business rejections (409 conflict, 410 sold_out, 429 rate-limit) as non-failures in k6's http_req_failed metric
+http.setResponseCallback(http.expectedStatuses({ min: 200, max: 399 }, 409, 410, 429));
 
 export const options = {
   scenarios: {
@@ -40,16 +45,17 @@ export default function () {
 
   while (!token && Date.now() < deadline) {
     const j = http.post(`${BASE}/api/queue/join`, JSON.stringify({ itemId: ITEM, userId: user }), HOLD);
-    if (j.status === 410) { soldOutC.add(1); return; }
-    if (j.status === 429 || j.status === 503) { sleep(1); continue; }
+    if (j.status === 410) { soldOutC.add(1); businessRejections.add(1); return; }
+    if (j.status === 429) { businessRejections.add(1); sleep(1); continue; }
+    if (j.status === 0 || j.status >= 500) { serverErrors.add(1); sleep(1); continue; }
     for (let i = 0; i < 240 && !token; i++) {
       const s = http.get(`${BASE}/api/queue/status?itemId=${ITEM}&userId=${user}`);
       if (s.status === 200) {
         const b = s.json();
         if (b.state === 'admitted') token = b.token;
-        else if (b.state === 'sold_out') { soldOutC.add(1); return; }
+        else if (b.state === 'sold_out') { soldOutC.add(1); businessRejections.add(1); return; }
         else if (b.state === 'not_in_queue') break; // queue lost (failover) -> rejoin
-      } else if (s.status === 503) sleep(1);
+      } else if (s.status === 0 || s.status >= 500) { serverErrors.add(1); sleep(1); }
       if (!token) sleep(0.5 + Math.random() * 0.5);
     }
   }
@@ -61,9 +67,9 @@ export default function () {
     const h = http.post(`${BASE}/api/holds`, JSON.stringify({ qty: 1 }), auth);
     holdLatency.add(h.timings.duration);
     if (h.status === 201) hold = h.json();
-    else if (h.status === 410) { soldOutC.add(1); return; }
-    else if (h.status === 409) { dupHold.add(1); return; }
-    else sleep(1); // 503 during failover recovery
+    else if (h.status === 410) { soldOutC.add(1); businessRejections.add(1); return; }
+    else if (h.status === 409) { dupHold.add(1); businessRejections.add(1); return; }
+    else { if (h.status === 0 || h.status >= 500) serverErrors.add(1); sleep(1); } // 503 during failover recovery
   }
   if (!hold) return;
 
@@ -75,7 +81,9 @@ export default function () {
     const first = r[0].body.result;
     if (first === 'confirmed') confirmed.add(1);
     else if (first === 'refunded') refunded.add(1);
-    else if (first === 'conflict') conflicts.add(1);
+    else if (first === 'conflict') { conflicts.add(1); businessRejections.add(1); }
+  } else if (p.status === 0 || p.status >= 500) {
+    serverErrors.add(1);
   }
 }
 
