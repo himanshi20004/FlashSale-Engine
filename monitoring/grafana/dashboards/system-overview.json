@@ -1,0 +1,158 @@
+{
+  "uid": "flashsale-system-overview",
+  "title": "Dashboard A: System Overview",
+  "tags": ["flashsale", "system", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Backend Admission Gate",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "flashsale_backend_admission_open", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "PAUSED", "color": "red" }, "1": { "text": "OPEN", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Redis Hot Health",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "flashsale_redis_up{role=\"hot\"}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Redis Event Bus Health",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "flashsale_redis_up{role=\"bus\"}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Requests / sec",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(rate(flashsale_http_requests_total[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "5xx Server Error Rate",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "100 * (sum(rate(flashsale_http_errors_total{status_class=\"5xx\"}[1m])) or vector(0)) / clamp_min(sum(rate(flashsale_http_requests_total[1m])), 1)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }] }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Active SSE Streams",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "flashsale_sse_active_connections", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "API Latency (p50 / p95 / p99)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(flashsale_http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(flashsale_http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(flashsale_http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p99", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 150 }, { "color": "red", "value": 500 }] }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "HTTP Throughput & Error Classification",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(flashsale_http_requests_total[1m])) by (route)", "legendFormat": "{{route}}", "refId": "A" },
+        { "expr": "sum(rate(flashsale_http_errors_total{status_class=\"4xx_business\"}[1m]))", "legendFormat": "4xx Business Rejections", "refId": "B" },
+        { "expr": "sum(rate(flashsale_http_errors_total{status_class=\"5xx\"}[1m]))", "legendFormat": "5xx Server Errors", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Backend CPU Usage (%)",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(flashsale_node_process_cpu_seconds_total[1m]) * 100", "legendFormat": "Backend Process CPU %", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Backend & Redis Memory Usage",
+      "gridPos": { "x": 8, "y": 12, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "flashsale_node_process_resident_memory_bytes", "legendFormat": "Backend RSS", "refId": "A" },
+        { "expr": "flashsale_redis_memory_used_bytes{role=\"hot\"}", "legendFormat": "Redis Hot Memory", "refId": "B" },
+        { "expr": "flashsale_redis_memory_used_bytes{role=\"bus\"}", "legendFormat": "Redis Bus Memory", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Redis Connected Clients & Op Latency (p95)",
+      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "flashsale_redis_connected_clients", "legendFormat": "Clients ({{role}})", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(flashsale_redis_operation_duration_seconds_bucket[1m])) by (le, operation)) * 1000", "legendFormat": "p95 ms ({{operation}})", "refId": "B" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,142 @@
+{
+  "uid": "flashsale-analytics",
+  "title": "Dashboard B: Flash Sale Analytics",
+  "tags": ["flashsale", "inventory", "bookings"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "item",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(flashsale_inventory_total, item_id)",
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Inventory",
+      "gridPos": { "x": 0, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_inventory_total{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Available Seats",
+      "gridPos": { "x": 3, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_inventory_available{item_id=~\"$item\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 10 }] } } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Held Seats",
+      "gridPos": { "x": 6, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_inventory_held{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Confirmed Bookings",
+      "gridPos": { "x": 9, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_bookings_confirmed_total{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Expired Holds",
+      "gridPos": { "x": 12, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_holds_expired_total{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Refunds",
+      "gridPos": { "x": 15, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_bookings_refunded_total{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "type": "gauge",
+      "title": "Booking Success Rate",
+      "gridPos": { "x": 18, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "100 * (sum(flashsale_bookings_confirmed_total{item_id=~\"$item\"}) or vector(0)) / clamp_min(sum(flashsale_hold_attempts_total{item_id=~\"$item\"}), 1)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Queue Length",
+      "gridPos": { "x": 21, "y": 0, "w": 3, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(flashsale_queue_waiting_users{item_id=~\"$item\"})", "refId": "A" }]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Inventory Utilization Over Time",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(flashsale_inventory_available{item_id=~\"$item\"})", "legendFormat": "Available", "refId": "A" },
+        { "expr": "sum(flashsale_inventory_held{item_id=~\"$item\"})", "legendFormat": "Held", "refId": "B" },
+        { "expr": "sum(flashsale_inventory_booked{item_id=~\"$item\"})", "legendFormat": "Booked", "refId": "C" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Booking Outcomes & Rejections (/sec)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(flashsale_bookings_confirmed_total{item_id=~\"$item\"}[1m]))", "legendFormat": "Confirmed /s", "refId": "A" },
+        { "expr": "sum(rate(flashsale_holds_expired_total{item_id=~\"$item\"}[1m]))", "legendFormat": "Expired /s", "refId": "B" },
+        { "expr": "sum(rate(flashsale_bookings_refunded_total{item_id=~\"$item\"}[1m]))", "legendFormat": "Refunded /s", "refId": "C" },
+        { "expr": "sum(rate(flashsale_inventory_sold_out_rejections_total{item_id=~\"$item\"}[1m]))", "legendFormat": "Sold-Out Rejections /s", "refId": "D" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Waiting Room Queue & Admission Rate",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(flashsale_queue_waiting_users{item_id=~\"$item\"})", "legendFormat": "Waiting Users", "refId": "A" },
+        { "expr": "sum(flashsale_queue_admitted_active{item_id=~\"$item\"})", "legendFormat": "Admitted Active", "refId": "B" },
+        { "expr": "sum(rate(flashsale_queue_admitted_total{item_id=~\"$item\"}[1m]))", "legendFormat": "Admissions /s", "refId": "C" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Average Queue Wait Time & Hold Latency (p95)",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(flashsale_queue_wait_duration_seconds_sum{item_id=~\"$item\"}[1m])) / clamp_min(sum(rate(flashsale_queue_wait_duration_seconds_count{item_id=~\"$item\"}[1m])), 1)", "legendFormat": "Avg Queue Wait (s)", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(flashsale_hold_create_duration_seconds_bucket{item_id=~\"$item\"}[1m])) by (le))", "legendFormat": "Hold Create p95 (s)", "refId": "B" },
+        { "expr": "histogram_quantile(0.95, sum(rate(flashsale_hold_confirm_duration_seconds_bucket{item_id=~\"$item\"}[1m])) by (le))", "legendFormat": "Confirm p95 (s)", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    }
+  ]
+}

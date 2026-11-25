@@ -1,0 +1,120 @@
+{
+  "uid": "flashsale-load-testing",
+  "title": "Dashboard C: Load Testing (k6 + Invariants)",
+  "tags": ["flashsale", "k6", "loadtest"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "k6 Virtual Users",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "max(k6_vus)", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "k6 Request Throughput",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(rate(k6_http_reqs_total[15s]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 1 } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "k6 Confirmed Flows",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(k6_flow_confirmed_total)", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "k6 Sold-Out (Expected 410)",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(k6_flow_sold_out_total)", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Oversell Violations (Must Be 0)",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "max(flashsale_inventory_oversell_violations)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Inventory Consistency Check",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "max(flashsale_inventory_consistency_violations)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CONSISTENT", "color": "green" }, "1": { "text": "DRIFT / IN-FLIGHT", "color": "yellow" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "k6 Virtual Users & Request Throughput",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(k6_vus)", "legendFormat": "VUs", "refId": "A" },
+        { "expr": "sum(rate(k6_http_reqs_total[15s]))", "legendFormat": "HTTP req/s", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "k6 API & Hold Latency (ms)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(k6_http_req_duration_p50) * 1000", "legendFormat": "HTTP p50", "refId": "A" },
+        { "expr": "max(k6_http_req_duration_p95) * 1000", "legendFormat": "HTTP p95", "refId": "B" },
+        { "expr": "max(k6_http_req_duration_p99) * 1000", "legendFormat": "HTTP p99", "refId": "C" },
+        { "expr": "max(k6_hold_latency_p95) * 1000", "legendFormat": "Hold Create p95", "refId": "D" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Successful Bookings vs Expected Business Rejections (/sec)",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(k6_flow_confirmed_total[15s]))", "legendFormat": "Confirmed /s", "refId": "A" },
+        { "expr": "sum(rate(k6_flow_sold_out_total[15s]))", "legendFormat": "Sold Out 410 /s", "refId": "B" },
+        { "expr": "sum(rate(k6_flow_conflict_409_total[15s]))", "legendFormat": "Conflict 409 /s", "refId": "C" },
+        { "expr": "sum(rate(k6_flow_refunded_total[15s]))", "legendFormat": "Refunded /s", "refId": "D" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Server HTTP Errors (5xx) vs Business Rejections",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(k6_flow_server_errors_total[15s]))", "legendFormat": "k6 Server/Network Errors /s", "refId": "A" },
+        { "expr": "sum(rate(flashsale_http_errors_total{status_class=\"5xx\"}[15s]))", "legendFormat": "Backend 5xx /s", "refId": "B" },
+        { "expr": "sum(rate(flashsale_http_errors_total{status_class=\"4xx_business\"}[15s]))", "legendFormat": "Backend 4xx Business Rejections /s", "refId": "C" }
+      ]
+    }
+  ]
+}
