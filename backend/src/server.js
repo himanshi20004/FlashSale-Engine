@@ -21,7 +21,7 @@ import {
 
 const app = express();
 if (process.env.CORS_ORIGIN) {
-  const allowedOrigin = process.env.CORS_ORIGIN;
+  const allowedOrigin = process.env.CORS_ORIGIN.trim().replace(/\/+$/, '');
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
