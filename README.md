@@ -254,7 +254,7 @@ Verified at any time via `GET /admin/verify/:id`:
 
 ## Live Demo 
 
-Quick commands for live demos and interviews (Windows PowerShell & Git Bash):
+Quick commands for live demos (Windows PowerShell & Git Bash):
 
 ### 1. Start the Local Stack (Docker)
 ```powershell
