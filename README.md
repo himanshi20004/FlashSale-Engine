@@ -252,6 +252,55 @@ Verified at any time via `GET /admin/verify/:id`:
 
 ---
 
+## Live Demo & Interview Commands (Copy-Paste)
+
+Quick commands for live demos and interviews (Windows PowerShell & Git Bash):
+
+### 1. Start the Local Stack (Docker)
+```powershell
+docker compose up --build -d mongo redis redis-bus backend frontend prometheus redis-exporter grafana
+```
+
+### 2. Seed / Reset Seats (`concert-1`, 50 seats)
+
+**Local Backend (`http://localhost:8080`) — PowerShell:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/admin/items?reset=true" `
+  -Headers @{ "x-admin-token" = "admin-secret"; "content-type" = "application/json" } `
+  -Body '{"id":"concert-1","totalSeats":50,"pricePaise":150000}'
+```
+
+**Live Render Backend — PowerShell:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "https://flashsale-engine-4lel.onrender.com/admin/items?reset=true" `
+  -Headers @{ "x-admin-token" = "<YOUR_ADMIN_TOKEN>"; "content-type" = "application/json" } `
+  -Body '{"id":"concert-1","totalSeats":50,"pricePaise":150000}'
+```
+
+### 3. Run k6 Load Test (300 Concurrent Users + p95/p99 Latency)
+```powershell
+docker compose --profile load run --rm -e VUS=300 -e SEATS=1000 -e HOLD_FOR=60s k6 run --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)" /loadtest/k6.js
+```
+
+### 4. Verify Zero Oversell & Seat Conservation
+**Local (`drop-1` from k6) — PowerShell:**
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/admin/verify/drop-1" -Headers @{ "x-admin-token" = "admin-secret" }
+```
+
+**Live Render (`concert-1`) — PowerShell:**
+```powershell
+Invoke-RestMethod -Uri "https://flashsale-engine-4lel.onrender.com/admin/verify/concert-1" -Headers @{ "x-admin-token" = "<YOUR_ADMIN_TOKEN>" }
+```
+
+### 5. Run Chaos Engineering Test (Git Bash)
+Kills Redis twice and restarts the backend mid-load, then verifies `"noOversell": true`:
+```bash
+bash scripts/chaos.sh
+```
+
+---
+
 ## Production Hardening Notes
 
 * **Replace demo defaults:** Override `TOKEN_SECRET`, `WEBHOOK_SECRET`, and `ADMIN_TOKEN`, and set `MOCK_PSP=false` outside local/test environments.
