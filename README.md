@@ -252,7 +252,7 @@ Verified at any time via `GET /admin/verify/:id`:
 
 ---
 
-## Live Demo & Interview Commands (Copy-Paste)
+## Live Demo 
 
 Quick commands for live demos and interviews (Windows PowerShell & Git Bash):
 
